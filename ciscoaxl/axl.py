@@ -1,7 +1,7 @@
 """
 Class to interface with cisco ucm axl api.
 Author: Jeff Levensailor
-Version: 0.1
+Version: 0.2
 Dependencies:
  - zeep: https://python-zeep.readthedocs.io/en/master/
 
@@ -14,7 +14,7 @@ from pathlib import Path
 import os
 import json
 from requests import Session
-from requests.exceptions import SSLError, ConnectionError
+from requests.auth import HTTPBasicAuth
 import re
 import urllib3
 from zeep import Client, Settings, Plugin
@@ -33,14 +33,12 @@ class axl(object):
     Python 3.6
     """
 
-    def __init__(self, username, password, cucm, cucm_version, cucm_port=8443, strict_ssl=False):
+    def __init__(self, username, password, cucm, cucm_version):
         """
         :param username: axl username
         :param password: axl password
         :param cucm: UCM IP address
         :param cucm_version: UCM version
-        :param cucm_port: UCM TCP port
-        :param strict_ssl: do not work around an SSL failure, default False
 
         example usage:
         >>> from axl import AXL
@@ -53,44 +51,15 @@ class axl(object):
         else:
             wsdl = str(Path(f"{cwd}/schema/{cucm_version}/AXLAPI.wsdl").absolute())
         session = Session()
-        session.auth = (username, password)
-
-        # validate session before assigning to Transport
-        url = f"https://{cucm}:{cucm_port}/axl/"
-        try:
-            ret_code = session.get(url, stream=True, timeout=10).status_code
-        except SSLError:
-            if strict_ssl:
-                raise
-
-            # retry with verify set False
-            session.close()
-            session = Session()
-            session.auth = (username, password)
-            session.verify = False
-            ret_code = session.get(url, stream=True, timeout=10).status_code
-        except ConnectionError:
-            raise Exception(f"{url} cannot be found, please try again") from None
-        if ret_code == 401:
-            raise Exception(
-                "[401 Unauthorized]: Please check your username and password"
-            )
-        elif ret_code == 403:
-            raise Exception(
-                f"[403 Forbidden]: Please ensure the user '{username}' has AXL access set up"
-            )
-        elif ret_code == 404:
-            raise Exception(
-                f"[404 Not Found]: AXL not found, please check your URL ({url})"
-            )
-
+        session.verify = False
+        session.auth = HTTPBasicAuth(username, password)
         settings = Settings(
             strict=False, xml_huge_tree=True, xsd_ignore_sequence_order=True
         )
         transport = Transport(session=session, timeout=10, cache=SqliteCache())
         axl_client = Client(wsdl, settings=settings, transport=transport)
 
-        self._zeep = axl_client
+        self.wsdl = wsdl
         self.username = username
         self.password = password
         self.wsdl = wsdl
@@ -101,7 +70,7 @@ class axl(object):
         )
         self.client = axl_client.create_service(
             "{http://www.cisco.com/AXLAPIService/}AXLAPIBinding",
-            f"https://{cucm}:{cucm_port}/axl/",
+            f"https://{cucm}:8443/axl/",
         )
 
     def get_locations(
@@ -126,10 +95,12 @@ class axl(object):
             return e
 
     def run_sql_query(self, query):
-        result = {"num_rows": 0, "query": query}
+        result = {'num_rows': 0,
+                  'query': query}
 
         try:
             sql_result = self.client.executeSQLQuery(sql=query)
+            print(sql_result)
         except Exception as fault:
             sql_result = None
             self.last_exception = fault
@@ -138,16 +109,16 @@ class axl(object):
         result_rows = []
 
         if sql_result is not None:
-            if sql_result["return"] is not None:
-                for row in sql_result["return"]["row"]:
+            if sql_result['return'] is not None:
+                for row in sql_result['return']['row']:
                     result_rows.append({})
                     for column in row:
                         result_rows[num_rows][column.tag] = column.text
                     num_rows += 1
 
-        result["num_rows"] = num_rows
+        result['num_rows'] = num_rows
         if num_rows > 0:
-            result["rows"] = result_rows
+            result['rows'] = result_rows
 
         return result
 
@@ -158,7 +129,7 @@ class axl(object):
         :return: result dictionary
         """
         try:
-            return self.client.executeSQLQuery(query)["return"]
+            return self.client.executeSQLQuery(query)['return']
         except Fault as e:
             return e
 
@@ -173,22 +144,14 @@ class axl(object):
         except Fault as e:
             return e
 
-    def get_ldap_dir(
-        self,
-        tagfilter={
-            "name": "",
-            "ldapDn": "",
-            "userSearchBase": "",
-        },
-    ):
+    def get_ldap_dir(self, tagfilter={"name": "", "ldapDn": "", "userSearchBase": "",}):
         """
         Get LDAP Syncs
         :return: result dictionary
         """
         try:
             return self.client.listLdapDirectory(
-                {"name": "%"},
-                returnedTags=tagfilter,
+                {"name": "%"}, returnedTags=tagfilter,
             )["return"]["ldapDirectory"]
         except Fault as e:
             return e
@@ -401,7 +364,7 @@ class axl(object):
         :return: result dictionary
         """
         try:
-            return self.client.getRegion(**args)["return"]["region"]
+            return self.client.getRegion(**args)
         except Fault as e:
             return e
 
@@ -501,14 +464,14 @@ class axl(object):
         except Fault as e:
             return e
 
-    def get_srst(self, **args):
+    def get_srst(self, name):
         """
         Get SRST information
         :param name: SRST name
         :return: result dictionary
         """
         try:
-            return self.client.getSrst(**args)["return"]["srst"]
+            return self.client.getSrst(name=name)
         except Fault as e:
             return e
 
@@ -587,7 +550,7 @@ class axl(object):
         :return: result dictionary
         """
         try:
-            return self.client.getDevicePool(**args)["return"]["devicePool"]
+            return self.client.getDevicePool(**args)
         except Fault as e:
             return e
 
@@ -687,20 +650,19 @@ class axl(object):
         """
         try:
             return self.client.listConferenceBridge(
-                {"name": "%"},
-                returnedTags=tagfilter,
+                {"name": "%"}, returnedTags=tagfilter,
             )["return"]["conferenceBridge"]
         except Fault as e:
             return e
 
-    def get_conference_bridge(self, **args):
+    def get_conference_bridge(self, name):
         """
         Get conference bridge parameters
         :param name: conference bridge name
         :return: result dictionary
         """
         try:
-            return self.client.getConferenceBridge(**args)["return"]["conferenceBridge"]
+            return self.client.getConferenceBridge(name=name)
         except Fault as e:
             return e
 
@@ -780,14 +742,14 @@ class axl(object):
         except Fault as e:
             return e
 
-    def get_transcoder(self, **args):
+    def get_transcoder(self, name):
         """
         Get conference bridge parameters
         :param name: transcoder name
         :return: result dictionary
         """
         try:
-            return self.client.getTranscoder(**args)["return"]["transcoder"]
+            return self.client.getTranscoder(name=name)
         except Fault as e:
             return e
 
@@ -857,14 +819,14 @@ class axl(object):
         except Fault as e:
             return e
 
-    def get_mtp(self, **args):
+    def get_mtp(self, name):
         """
         Get mtp parameters
         :param name: transcoder name
         :return: result dictionary
         """
         try:
-            return self.client.getMtp(**args)["return"]["mtp"]
+            return self.client.getMtp(name=name)
         except Fault as e:
             return e
 
@@ -943,14 +905,14 @@ class axl(object):
         except Fault as e:
             return e
 
-    def get_h323_gateway(self, **args):
+    def get_h323_gateway(self, name):
         """
         Get H323 Gateway parameters
         :param name: H323 Gateway name
         :return: result dictionary
         """
         try:
-            return self.client.getH323Gateway(**args)["return"]["h323Gateway"]
+            return self.client.getH323Gateway(name=name)
         except Fault as e:
             return e
 
@@ -1037,7 +999,7 @@ class axl(object):
         :return: result dictionary
         """
         try:
-            return self.client.getRouteGroup(**args)["return"]["routeGroup"]
+            return self.client.getRouteGroup(**args)
         except Fault as e:
             return e
 
@@ -1087,7 +1049,7 @@ class axl(object):
         Update a Route group
         :param name: The name of the Route group to update
         :param distribution_algorithm: Top Down/Circular
-        :param members: A list of devices to add (must already exist DUH!)
+        :param members: A list of devices to add (must already exist DUH!)        
         :return: result dictionary
         """
         try:
@@ -1116,7 +1078,7 @@ class axl(object):
         :return: result dictionary
         """
         try:
-            return self.client.getRouteList(**args)["return"]["routeList"]
+            return self.client.getRouteList(**args)
         except Fault as e:
             return e
 
@@ -1225,7 +1187,7 @@ class axl(object):
         :return: result dictionary
         """
         try:
-            return self.client.getRoutePartition(**args)["return"]["routePartition"]
+            return self.client.getRoutePartition(**args)
         except Fault as e:
             return e
 
@@ -1289,7 +1251,7 @@ class axl(object):
         except Fault as e:
             return e
 
-    def get_calling_search_space(self, **args):
+    def get_calling_search_space(self, **css):
         """
         Get Calling search space details
         :param name: Calling search space name
@@ -1297,7 +1259,7 @@ class axl(object):
         :return: result dictionary
         """
         try:
-            return self.client.getCss(**args)["return"]["css"]
+            return self.client.getCss(**css)
         except Fault as e:
             return e
 
@@ -1317,10 +1279,7 @@ class axl(object):
         if members:
             [
                 req["members"]["member"].append(
-                    {
-                        "routePartitionName": i,
-                        "index": members.index(i) + 1,
-                    }
+                    {"routePartitionName": i, "index": members.index(i) + 1,}
                 )
                 for i in members
             ]
@@ -1368,8 +1327,7 @@ class axl(object):
         """
         try:
             return self.client.listRoutePattern(
-                {"pattern": "%"},
-                returnedTags=tagfilter,
+                {"pattern": "%"}, returnedTags=tagfilter,
             )["return"]["routePattern"]
         except Fault as e:
             return e
@@ -1392,9 +1350,7 @@ class axl(object):
             if "return" in uuid and uuid["return"] is not None:
                 uuid = uuid["return"]["routePattern"][0]["uuid"]
                 try:
-                    return self.client.getRoutePattern(uuid=uuid)["return"][
-                        "routePattern"
-                    ]
+                    return self.client.getRoutePattern(uuid=uuid)
                 except Fault as e:
                     return e
 
@@ -1496,16 +1452,14 @@ class axl(object):
         except Fault as e:
             return e
 
-    def get_media_resource_group(self, **args):
+    def get_media_resource_group(self, name):
         """
         Get a media resource group details
         :param media_resource_group: Media resource group name
         :return: result dictionary
         """
         try:
-            return self.client.getMediaResourceGroup(**args)["return"][
-                "mediaResourceGroup"
-            ]
+            return self.client.getMediaResourceGroup(name=name)
         except Fault as e:
             return e
 
@@ -1631,12 +1585,7 @@ class axl(object):
             return e
 
     def get_directory_numbers(
-        self,
-        tagfilter={
-            "pattern": "",
-            "description": "",
-            "routePartitionName": "",
-        },
+        self, tagfilter={"pattern": "", "description": "", "routePartitionName": "",}
     ):
         """
         Get directory numbers
@@ -1658,7 +1607,7 @@ class axl(object):
         :return: result dictionary
         """
         try:
-            return self.client.getLine(**args)["return"]["line"]
+            return self.client.getLine(**args)
         except Fault as e:
             return e
 
@@ -1829,7 +1778,7 @@ class axl(object):
         :return: result dictionary
         """
         try:
-            return self.client.getCtiRoutePoint(**args)["return"]["ctiRoutePoint"]
+            return self.client.getCtiRoutePoint(**args)
         except Fault as e:
             return e
 
@@ -1932,33 +1881,27 @@ class axl(object):
             return self.client.updateCtiRoutePoint(**args)
         except Fault as e:
             return e
-
-    def get_phones(
-        self,
-        query={"name": "%"},
-        tagfilter={
+    
+    def get_phones(self, query={"name": "%"}, tagfilter={
             "name": "",
             "product": "",
             "description": "",
             "protocol": "",
             "locationName": "",
-            "callingSearchSpaceName": "",
-        },
-    ):
-        skip = 0
+            "callingSearchSpaceName": ""
+        }):
+        skip=0
         a = []
-
         def inner(skip):
             while True:
                 res = self.client.listPhone(
-                    searchCriteria=query, returnedTags=tagfilter, first=1000, skip=skip
-                )["return"]
-                skip = skip + 1000
-                if res is not None and "phone" in res:
-                    yield res["phone"]
+                            searchCriteria=query, returnedTags=tagfilter, first=1000, skip=skip
+                        )["return"]
+                skip=skip+1000
+                if res is not None and 'phone' in res:
+                    yield res['phone']
                 else:
                     break
-
         for each in inner(skip):
             a.extend(each)
         return a
@@ -1998,6 +1941,8 @@ class axl(object):
         em_url_button_index="1",
         em_url_label="Press here to logon",
         ehook_enable=1,
+        owner_username="",
+        mobility_username=""
     ):
         """
         lines takes a list of Tuples with properties for each line EG:
@@ -2055,6 +2000,8 @@ class axl(object):
             "lines": {"line": []},
             "services": {"service": []},
             "vendorConfig": [{"ehookEnable": ehook_enable}],
+            "ownerUserName": owner_username,
+            "mobilityUserIdName": mobility_username,
         }
 
         if lines:
@@ -2144,12 +2091,7 @@ class axl(object):
 
     def get_device_profiles(
         self,
-        tagfilter={
-            "name": "",
-            "product": "",
-            "protocol": "",
-            "phoneTemplateName": "",
-        },
+        tagfilter={"name": "", "product": "", "protocol": "", "phoneTemplateName": "",},
     ):
         """
         Get device profile details
@@ -2158,8 +2100,7 @@ class axl(object):
         """
         try:
             return self.client.listDeviceProfile(
-                {"name": "%"},
-                returnedTags=tagfilter,
+                {"name": "%"}, returnedTags=tagfilter,
             )["return"]["deviceProfile"]
         except Fault as e:
             return e
@@ -2172,7 +2113,7 @@ class axl(object):
         :return: result dictionary
         """
         try:
-            return self.client.getDeviceProfile(**args)["return"]["deviceProfile"]
+            return self.client.getDeviceProfile(**args)
         except Fault as e:
             return e
 
@@ -2276,35 +2217,24 @@ class axl(object):
         except Fault as e:
             return e
 
+
     def get_users(self, tagfilter={"userid": "", "firstName": "", "lastName": ""}):
         """
         Get users details
-        Parameters
-        -------
-        tagfilter : dictionary, optional
-            userid: None or uuid of user
-            firstName: None or first name of user
-            lastName: None or last name of user
-        
-        Returns
-        -------
-        users
-            A list of Users
+        :return: A list of dictionary's
         """
-        skip = 0
+        skip=0
         a = []
-
         def inner(skip):
             while True:
                 res = self.client.listUser(
-                    {"userid": "%"}, returnedTags=tagfilter, first=1000, skip=skip
-                )["return"]
-                skip = skip + 1000
-                if res is not None and "user" in res:
-                    yield res["user"]
+                            {"userid": "%"}, returnedTags=tagfilter, first=1000, skip=skip
+                        )["return"]
+                skip=skip+1000
+                if res is not None and 'user' in res:
+                    yield res['user']
                 else:
                     break
-
         for each in inner(skip):
             a.extend(each)
         return a
@@ -2383,7 +2313,7 @@ class axl(object):
             try:
                 return self.client.updateUser(
                     userid=user_id,
-                    phoneProfiles={"profileName": {"uuid": uuid}},
+                    phoneProfiles={"profileName": {"_uuid": uuid}},
                     defaultProfile=default_profile,
                     subscribeCallingSearchSpaceName=subscribe_css,
                     primaryExtension={"pattern": primary_extension},
@@ -2394,7 +2324,7 @@ class axl(object):
         else:
             return "Device Profile not found for user"
 
-    def update_user_credentials(self, userid, password="", pin=""):  # nosec
+    def update_user_credentials(self, userid, password="", pin=""):
         """
         Update end user for credentials
         :param userid: User ID
@@ -2403,18 +2333,16 @@ class axl(object):
         :return: result dictionary
         """
 
-        if password == "" and pin == "":  # nosec
+        if password == "" and pin == "":
             return "Password and/or Pin are required"
 
-        elif password != "" and pin != "":  # nosec
+        elif password != "" and pin != "":
             try:
-                return self.client.updateUser(
-                    userid=userid, password=password, pin=pin
-                )  # nosec
+                return self.client.updateUser(userid=userid, password=password, pin=pin)
             except Fault as e:
                 return e
 
-        elif password != "":  # nosec
+        elif password != "":
             try:
                 return self.client.updateUser(userid=userid, password=password)
             except Fault as e:
@@ -2460,6 +2388,7 @@ class axl(object):
                     "callingPartyTransformationMask": "",
                     "digitDiscardInstructionName": "",
                     "callingPartyPrefixDigits": "",
+                    "provideOutsideDialtone": "",
                 },
             )["return"]["transPattern"]
         except Fault as e:
@@ -2737,9 +2666,7 @@ class axl(object):
         :return: result dictionary
         """
         try:
-            return self.client.getCalledPartyTransformationPattern(**args)["return"][
-                "calledPartyTransformationPattern"
-            ]
+            return self.client.getCalledPartyTransformationPattern(**args)
         except Fault as e:
             return e
 
@@ -2840,9 +2767,7 @@ class axl(object):
         :return: result dictionary
         """
         try:
-            return self.client.getCallingPartyTransformationPattern(**args)["return"][
-                "callingPartyTransformationPattern"
-            ]
+            return self.client.getCallingPartyTransformationPattern(**args)
         except Fault as e:
             return e
 
@@ -2938,7 +2863,7 @@ class axl(object):
         :return: result dictionary
         """
         try:
-            return self.client.getSipTrunk(**args)["return"]["sipTrunk"]
+            return self.client.getSipTrunk(**args)
         except Fault as e:
             return e
 
@@ -3067,349 +2992,5 @@ class axl(object):
         """
         try:
             return self.client.removeCallManagerGroup({"name": name})
-        except Fault as e:
-            return e
-
-    # Hunt Pilot Methods
-    def get_hunt_pilots(
-        self,
-        tagfilter={
-            "pattern": "",
-            "description": "",
-            "routePartitionName": "",
-        },
-    ):
-        """
-        Get hunt pilots
-        :param mini: return a list of tuples of hunt pilot details
-        :return: A list of dictionary's
-        """
-        try:
-            response = self.client.listHuntPilot(
-                {"pattern": "%"},
-                returnedTags=tagfilter,
-            )["return"]
-            if response:
-                return response["huntPilot"]
-            else:
-                return response
-        except Fault as e:
-            return e
-
-    def get_hunt_pilot(self, **args):
-        """
-        Get hunt pilot details
-        :param name:
-        :param partition:
-        :return: result dictionary
-        """
-        try:
-            return self.client.getHuntPilot(**args)["return"]["huntPilot"]
-        except Fault as e:
-            return e
-
-    def add_hunt_pilot(self, **args):
-        """
-        Add a Hunt Pilot minimal params needed
-        :param pattern: pattern - required
-        :param routePartitionName: partition required
-        :param description: Hunt Pilot pattern description
-        :param useCallingPartyPhoneMask: "Off" or "On"
-        :param blockEnable: boolean (true or false)
-        :param huntListName:
-        :return: result dictionary
-        """
-        try:
-            return self.client.addHuntPilot({**args})
-        except Fault as e:
-            return e
-
-    def update_hunt_pilot(self, **args):
-        """
-        Update a Hunt Pilot
-        :param pattern: pattern - required
-        :param routePartitionName: partition required
-        :param description: Hunt Pilot pattern description
-        :param useCallingPartyPhoneMask: "Off" or "On"
-        :param blockEnable: boolean (true or false)
-        :param huntListName:
-        :return:
-        """
-        try:
-            return self.client.updateHuntPilot(**args)
-        except Fault as e:
-            return e
-
-    def delete_hunt_pilot(self, **args):
-        """
-        Delete a Hunt Pilot
-        :param uuid: The pattern uuid
-        :param pattern: The pattern of the transformation to delete
-        :param partition: The name of the partition
-        :return: result dictionary
-        """
-        try:
-            return self.client.removeHuntPilot(**args)
-        except Fault as e:
-            return e
-
-    # Hunt List Methods
-    def get_hunt_lists(
-        self,
-        tagfilter={
-            "name": "",
-            "callManagerGroupName": "",
-            "routeListEnabled": "",
-            "voiceMailUsage": "",
-            "description": "",
-        },
-    ):
-        """
-        Get hunt lists
-        :param mini: return a list of tuples of hunt pilot details
-        :return: A list of dictionary's
-        """
-        try:
-            response = self.client.listHuntList(
-                {"name": "%"},
-                returnedTags=tagfilter,
-            )["return"]
-            if response:
-                return response["huntList"]
-            else:
-                return response
-        except Fault as e:
-            return e
-
-    def get_hunt_list(self, **args):
-        """
-        Get hunt list details
-        :param name:
-        :param partition:
-        :return: result dictionary
-        """
-        try:
-            return self.client.getHuntList(**args)["return"]["huntList"]
-        except Fault as e:
-            return e
-
-    def add_hunt_list(self, **args):
-        """
-        Add a Hunt list minimal params needed
-        :param name: - required
-        :param callManagerGroup: - required
-        :param description: str
-        :param routeListEnabled: bool
-        :param voiceMailUsage: bool
-        :return: result dictionary
-        """
-        try:
-            return self.client.addHuntList({**args})
-        except Fault as e:
-            return e
-
-    def update_hunt_list(self, **args):
-        """
-        Update a Hunt List
-        :param name: - required
-        :param callManagerGroup: - required
-        :param description: str
-        :param routeListEnabled: bool
-        :param voiceMailUsage: bool
-        :return:
-        """
-        try:
-            return self.client.updateHuntList(**args)
-        except Fault as e:
-            return e
-
-    def delete_hunt_list(self, **args):
-        """
-        Delete a Hunt List
-        :param name: - required
-        :return: result dictionary
-        """
-        try:
-            return self.client.removeHuntList(**args)
-        except Fault as e:
-            return e
-
-    # Line Group Methods
-    def get_line_groups(
-        self,
-        tagfilter={
-            "name": "",
-            "distributionAlgorithm": "",
-            "rnaReversionTimeOut": "",
-            "huntAlgorithmNoAnswer": "",
-            "huntAlgorithmBusy": "",
-            "huntAlgorithmNotAvailable": "",
-            "autoLogOffHunt": "",
-        },
-    ):
-        """
-        Get Line Groups
-        :param mini: return a list of tuples of hunt pilot details
-        :return: A list of dictionary's
-        """
-        try:
-            response = self.client.listLineGroup(
-                {"name": "%"},
-                returnedTags=tagfilter,
-            )["return"]
-            if response:
-                return response["lineGroup"]
-            else:
-                return response
-        except Fault as e:
-            return e
-
-    def get_line_group(self, **args):
-        """
-        Get line group details
-        :param name:
-        :return: result dictionary
-        """
-        try:
-            return self.client.getLineGroup(**args)["return"]["lineGroup"]
-        except Fault as e:
-            return e
-
-    def add_line_group(self, **args):
-        """
-        Add a Line Group minimal params needed
-        :param name: - required
-        :param distributionAlgorithm: "Longest Idle Time", "Broadcast" etc...
-        :param rnaReversionTimeOut:
-        :param huntAlgorithmNoAnswer: "Try next member; then, try next group in Hunt List",
-        :param huntAlgorithmBusy: "Try next member; then, try next group in Hunt List",
-        :param huntAlgorithmNotAvailable: "Try next member; then, try next group in Hunt List",
-        :param members: dict for each member directory number
-        :return: result dictionary
-        """
-        try:
-            return self.client.addLineGroup({**args})
-        except Fault as e:
-            return e
-
-    def update_line_group(self, **args):
-        """
-        Update a Line Group
-        :param name: - required
-        :param distributionAlgorithm: "Longest Idle Time", "Broadcast" etc...
-        :param rnaReversionTimeOut:
-        :param huntAlgorithmNoAnswer: "Try next member; then, try next group in Hunt List",
-        :param huntAlgorithmBusy: "Try next member; then, try next group in Hunt List",
-        :param huntAlgorithmNotAvailable: "Try next member; then, try next group in Hunt List",
-        :param members: dict for each member directory number
-        :return: result dictionary
-        :return:
-        """
-        try:
-            return self.client.updateLineGroup(**args)
-        except Fault as e:
-            return e
-
-    def delete_line_group(self, **args):
-        """
-        Delete a Line Group
-        :param name: - required
-        :return: result dictionary
-        """
-        try:
-            return self.client.removeLineGroup(**args)
-        except Fault as e:
-            return e
-
-    # Call Pickup Group Methods
-    def get_call_pickup_groups(
-        self,
-        tagfilter={
-            "name": "",
-            "pattern": "",
-            "description": "",
-            "usage": "",
-            "routePartitionName": "",
-            "pickupNotification": "",
-            "pickupNotificationTimer": "",
-            "callInfoForPickupNotification": "",
-        },
-    ):
-        """
-        Get Call Pickup Groups
-        :param pattern: return a list of tuples of hunt pilot details
-        :return: A list of dictionary's
-        """
-        try:
-            response = self.client.listCallPickupGroup(
-                {"pattern": "%"},
-                returnedTags=tagfilter,
-            )["return"]
-            if response:
-                return response["callPickupGroup"]
-            else:
-                return response
-        except Fault as e:
-            return e
-
-    def get_call_pickup_group(self, **args):
-        """
-        Get call pickup group details
-        :param pattern:
-        :param name:
-        :param
-        :return: result dictionary
-        """
-        try:
-            return self.client.getCallPickupGroup(**args)["return"]["callPickupGroup"]
-        except Fault as e:
-            return e
-
-    def add_call_pickup_group(self, **args):
-        """
-        Add a Call Pickup Group minimal params needed
-        :param name: - required
-        :param pattern: - required
-        :param description:
-        :param usage:
-        :param routePartitionName:
-        :param pickupNotification:
-        :param pickupNotificationTimer:
-        :param callInfoForPickupNotification:
-        :param members:
-        :return: result dictionary
-        """
-        try:
-            return self.client.addCallPickupGroup({**args})
-        except Fault as e:
-            return e
-
-    def update_call_pickup_group(self, **args):
-        """
-        Update a Call Pickup Group
-        :param name:
-        :param pattern:
-        :param description:
-        :param usage:
-        :param routePartitionName:
-        :param pickupNotification:
-        :param pickupNotificationTimer:
-        :param callInfoForPickupNotification:
-        :param members:
-        :return: result dictionary
-        """
-        try:
-            return self.client.updateCallPickupGroup(**args)
-        except Fault as e:
-            return e
-
-    def delete_call_pickup_group(self, **args):
-        """
-        Delete a Call Pickup Group
-        :param name: - required
-        :return: result dictionary
-        """
-        try:
-            return self.client.removeCallPickupGroup(**args)
         except Fault as e:
             return e
